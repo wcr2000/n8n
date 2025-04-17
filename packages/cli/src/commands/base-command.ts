@@ -3,6 +3,7 @@ import { GlobalConfig } from '@n8n/config';
 import { Container } from '@n8n/di';
 import { Command, Errors } from '@oclif/core';
 import {
+	BinaryDataConfig,
 	BinaryDataService,
 	InstanceSettings,
 	Logger,
@@ -23,6 +24,7 @@ import {
 } from '@/constants';
 import * as CrashJournal from '@/crash-journal';
 import * as Db from '@/db';
+import { ModuleRegistry } from '@/decorators/module';
 import { getDataDeduplicationService } from '@/deduplication';
 import { DeprecationService } from '@/deprecation/deprecation.service';
 import { TestRunnerService } from '@/evaluation.ee/test-runner/test-runner.service.ee';
@@ -33,6 +35,8 @@ import { ExternalHooks } from '@/external-hooks';
 import { ExternalSecretsManager } from '@/external-secrets.ee/external-secrets-manager.ee';
 import { License } from '@/license';
 import { LoadNodesAndCredentials } from '@/load-nodes-and-credentials';
+import type { ModulePreInit } from '@/modules/modules.config';
+import { ModulesConfig } from '@/modules/modules.config';
 import { NodeTypes } from '@/node-types';
 import { PostHogClient } from '@/posthog';
 import { ShutdownService } from '@/shutdown/shutdown.service';
@@ -57,6 +61,8 @@ export abstract class BaseCommand extends Command {
 
 	protected readonly globalConfig = Container.get(GlobalConfig);
 
+	protected readonly modulesConfig = Container.get(ModulesConfig);
+
 	/**
 	 * How long to wait for graceful shutdown before force killing the process.
 	 */
@@ -65,6 +71,33 @@ export abstract class BaseCommand extends Command {
 
 	/** Whether to init community packages (if enabled) */
 	protected needsCommunityPackages = false;
+
+	protected async loadModules() {
+		for (const moduleName of this.modulesConfig.modules) {
+			let preInitModule: ModulePreInit | undefined;
+			try {
+				preInitModule = (await import(
+					`../modules/${moduleName}/${moduleName}.pre-init`
+				)) as ModulePreInit;
+			} catch {}
+
+			if (
+				!preInitModule ||
+				preInitModule.shouldLoadModule?.({
+					database: this.globalConfig.database,
+					instance: this.instanceSettings,
+				})
+			) {
+				// register module in the registry for the dependency injection
+				await import(`../modules/${moduleName}/${moduleName}.module`);
+
+				this.modulesConfig.addLoadedModule(moduleName);
+				this.logger.debug(`Loaded module "${moduleName}"`);
+			}
+		}
+
+		Container.get(ModuleRegistry).initializeModules();
+	}
 
 	async init(): Promise<void> {
 		this.errorReporter = Container.get(ErrorReporter);
@@ -150,8 +183,9 @@ export abstract class BaseCommand extends Command {
 	}
 
 	async initObjectStoreService() {
-		const isSelected = config.getEnv('binaryDataManager.mode') === 's3';
-		const isAvailable = config.getEnv('binaryDataManager.availableModes').includes('s3');
+		const binaryDataConfig = Container.get(BinaryDataConfig);
+		const isSelected = binaryDataConfig.mode === 's3';
+		const isAvailable = binaryDataConfig.availableModes.includes('s3');
 
 		if (!isSelected) return;
 
@@ -188,8 +222,7 @@ export abstract class BaseCommand extends Command {
 			process.exit(1);
 		}
 
-		const binaryDataConfig = config.getEnv('binaryDataManager');
-		await Container.get(BinaryDataService).init(binaryDataConfig);
+		await Container.get(BinaryDataService).init();
 	}
 
 	protected async initDataDeduplicationService() {

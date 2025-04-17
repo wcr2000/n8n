@@ -1,22 +1,27 @@
 <script setup lang="ts">
+import { ViewableMimeTypes } from '@n8n/api-types';
 import { useStorage } from '@/composables/useStorage';
 import { saveAs } from 'file-saver';
-import {
-	type IBinaryData,
-	type IConnectedNode,
-	type IDataObject,
-	type INodeExecutionData,
-	type INodeOutputConfiguration,
-	type IRunData,
-	type IRunExecutionData,
-	type ITaskMetadata,
-	type NodeError,
-	type NodeHint,
-	TRIMMED_TASK_DATA_CONNECTIONS_KEY,
-	type Workflow,
-	parseErrorMetadata,
+import type {
+	IBinaryData,
+	IConnectedNode,
+	IDataObject,
+	INodeExecutionData,
+	INodeOutputConfiguration,
+	IRunData,
+	IRunExecutionData,
+	ITaskMetadata,
+	NodeError,
+	NodeHint,
+	Workflow,
+	NodeConnectionType,
 } from 'n8n-workflow';
-import { NodeConnectionType, NodeHelpers } from 'n8n-workflow';
+import {
+	parseErrorMetadata,
+	NodeConnectionTypes,
+	NodeHelpers,
+	TRIMMED_TASK_DATA_CONNECTIONS_KEY,
+} from 'n8n-workflow';
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, toRef, watch } from 'vue';
 
 import type {
@@ -73,7 +78,6 @@ import {
 	N8nInfoTip,
 	N8nLink,
 	N8nOption,
-	N8nRadioButtons,
 	N8nSelect,
 	N8nSpinner,
 	N8nTabs,
@@ -82,11 +86,13 @@ import {
 } from '@n8n/design-system';
 import { storeToRefs } from 'pinia';
 import { useRoute } from 'vue-router';
-import { useExecutionHelpers } from '@/composables/useExecutionHelpers';
 import { useUIStore } from '@/stores/ui.store';
 import { useSchemaPreviewStore } from '@/stores/schemaPreview.store';
 import { asyncComputed } from '@vueuse/core';
 import { usePostHog } from '@/stores/posthog.store';
+import ViewSubExecution from './ViewSubExecution.vue';
+import RunDataItemCount from '@/components/RunDataItemCount.vue';
+import RunDataDisplayModeSelect from '@/components/RunDataDisplayModeSelect.vue';
 
 const LazyRunDataTable = defineAsyncComponent(
 	async () => await import('@/components/RunDataTable.vue'),
@@ -114,7 +120,7 @@ type Props = {
 	runIndex: number;
 	tooMuchDataTitle: string;
 	executingMessage: string;
-	pushRef: string;
+	pushRef?: string;
 	paneType: NodePanelType;
 	noDataInBranchMessage: string;
 	node?: INodeUi | null;
@@ -130,6 +136,11 @@ type Props = {
 	isPaneActive?: boolean;
 	hidePagination?: boolean;
 	calloutMessage?: string;
+	disableRunIndexSelection?: boolean;
+	disableEdit?: boolean;
+	disablePin?: boolean;
+	compact?: boolean;
+	tableHeaderBgColor?: 'base' | 'light';
 };
 
 const props = withDefaults(defineProps<Props>(), {
@@ -144,7 +155,26 @@ const props = withDefaults(defineProps<Props>(), {
 	isExecuting: false,
 	hidePagination: false,
 	calloutMessage: undefined,
+	disableRunIndexSelection: false,
+	disableEdit: false,
+	disablePin: false,
+	compact: false,
+	tableHeaderBgColor: 'base',
 });
+
+defineSlots<{
+	content: {};
+	'callout-message': {};
+	header: {};
+	'input-select': {};
+	'before-data': {};
+	'run-info': {};
+	'node-waiting': {};
+	'node-not-run': {};
+	'no-output-data': {};
+	'recovered-artificial-output-data': {};
+}>();
+
 const emit = defineEmits<{
 	search: [search: string];
 	runChange: [runIndex: number];
@@ -164,7 +194,7 @@ const emit = defineEmits<{
 	];
 }>();
 
-const connectionType = ref<NodeConnectionType>(NodeConnectionType.Main);
+const connectionType = ref<NodeConnectionType>(NodeConnectionTypes.Main);
 const dataSize = ref(0);
 const showData = ref(false);
 const userEnabledShowData = ref(false);
@@ -196,7 +226,6 @@ const nodeHelpers = useNodeHelpers();
 const externalHooks = useExternalHooks();
 const telemetry = useTelemetry();
 const i18n = useI18n();
-const { trackOpeningRelatedExecution, resolveRelatedExecutionUrl } = useExecutionHelpers();
 
 const node = toRef(props, 'node');
 
@@ -245,33 +274,6 @@ const canPinData = computed(
 		pinnedData.isValidNodeType.value &&
 		!(binaryData.value && binaryData.value.length > 0),
 );
-const displayModes = computed(() => {
-	const defaults: Array<{ label: string; value: IRunDataDisplayMode }> = [
-		{ label: i18n.baseText('runData.table'), value: 'table' },
-		{ label: i18n.baseText('runData.json'), value: 'json' },
-	];
-
-	if (binaryData.value.length) {
-		defaults.push({ label: i18n.baseText('runData.binary'), value: 'binary' });
-	}
-
-	const schemaView = { label: i18n.baseText('runData.schema'), value: 'schema' } as const;
-	if (isPaneTypeInput.value) {
-		defaults.unshift(schemaView);
-	} else {
-		defaults.push(schemaView);
-	}
-
-	if (
-		isPaneTypeOutput.value &&
-		activeNode.value?.type === HTML_NODE_TYPE &&
-		activeNode.value.parameters.operation === 'generateHtmlTemplate'
-	) {
-		defaults.unshift({ label: 'HTML', value: 'html' });
-	}
-
-	return defaults;
-});
 
 const hasNodeRun = computed(() =>
 	Boolean(
@@ -514,6 +516,9 @@ const parentNodePinnedData = computed(() => {
 });
 
 const showPinButton = computed(() => {
+	if (props.disablePin) {
+		return false;
+	}
 	if (!rawInputData.value.length && !pinnedData.hasData.value) {
 		return false;
 	}
@@ -554,12 +559,6 @@ const activeTaskMetadata = computed((): ITaskMetadata | null => {
 	return workflowRunData.value?.[node.value.name]?.[props.runIndex]?.metadata ?? null;
 });
 
-const hasRelatedExecution = computed(() => {
-	return Boolean(
-		activeTaskMetadata.value?.subExecution ?? activeTaskMetadata.value?.parentExecution,
-	);
-});
-
 const hasInputOverwrite = computed((): boolean => {
 	if (!node.value) {
 		return false;
@@ -574,7 +573,10 @@ const isSchemaPreviewEnabled = computed(
 		!(nodeType.value?.codex?.categories ?? []).some(
 			(category) => category === CORE_NODES_CATEGORY,
 		) &&
-		posthogStore.isFeatureEnabled(SCHEMA_PREVIEW_EXPERIMENT),
+		posthogStore.isVariantEnabled(
+			SCHEMA_PREVIEW_EXPERIMENT.name,
+			SCHEMA_PREVIEW_EXPERIMENT.variant,
+		),
 );
 
 const hasPreviewSchema = asyncComputed(async () => {
@@ -597,6 +599,14 @@ const hasPreviewSchema = asyncComputed(async () => {
 	}
 	return false;
 }, false);
+
+const itemsCountProps = computed<InstanceType<typeof RunDataItemCount>['$props']>(() => ({
+	search: search.value,
+	dataCount: dataCount.value,
+	unfilteredDataCount: unfilteredDataCount.value,
+	subExecutionsCount: activeTaskMetadata.value?.subExecutionsCount,
+	muted: props.compact || (props.paneType === 'input' && maxRunIndex.value === 0),
+}));
 
 watch(node, (newNode, prevNode) => {
 	if (newNode?.id === prevNode?.id) return;
@@ -1079,7 +1089,7 @@ function getRunLabel(option: number) {
 function getRawInputData(
 	runIndex: number,
 	outputIndex: number,
-	connectionType: NodeConnectionType = NodeConnectionType.Main,
+	connectionType: NodeConnectionType = NodeConnectionTypes.Main,
 ): INodeExecutionData[] {
 	let inputData: INodeExecutionData[] = [];
 
@@ -1127,7 +1137,7 @@ function getFilteredData(data: INodeExecutionData[]): INodeExecutionData[] {
 function getDataCount(
 	runIndex: number,
 	outputIndex: number,
-	connectionType: NodeConnectionType = NodeConnectionType.Main,
+	connectionType: NodeConnectionType = NodeConnectionTypes.Main,
 ) {
 	if (!node.value) {
 		return 0;
@@ -1162,7 +1172,7 @@ function init() {
 		const outputs = getResolvedNodeOutputs();
 		outputTypes = NodeHelpers.getConnectionTypes(outputs);
 	}
-	connectionType.value = outputTypes.length === 0 ? NodeConnectionType.Main : outputTypes[0];
+	connectionType.value = outputTypes.length === 0 ? NodeConnectionTypes.Main : outputTypes[0];
 	if (binaryData.value.length > 0) {
 		ndvStore.setPanelDisplayMode({
 			pane: props.paneType,
@@ -1182,10 +1192,8 @@ function closeBinaryDataDisplay() {
 }
 
 function isViewable(index: number, key: string | number): boolean {
-	const { fileType } = binaryData.value[index][key];
-	return (
-		!!fileType && ['image', 'audio', 'video', 'text', 'json', 'pdf', 'html'].includes(fileType)
-	);
+	const { mimeType } = binaryData.value[index][key];
+	return ViewableMimeTypes.includes(mimeType);
 }
 
 function isDownloadable(index: number, key: string | number): boolean {
@@ -1306,31 +1314,14 @@ function onSearchClear() {
 	document.dispatchEvent(new KeyboardEvent('keyup', { key: '/' }));
 }
 
-function getExecutionLinkLabel(task: ITaskMetadata): string | undefined {
-	if (task.parentExecution) {
-		return i18n.baseText('runData.openParentExecution', {
-			interpolate: { id: task.parentExecution.executionId },
-		});
-	}
-
-	if (task.subExecution) {
-		if (activeTaskMetadata.value?.subExecutionsCount === 1) {
-			return i18n.baseText('runData.openSubExecutionSingle');
-		} else {
-			return i18n.baseText('runData.openSubExecutionWithId', {
-				interpolate: { id: task.subExecution.executionId },
-			});
-		}
-	}
-
-	return;
-}
-
 defineExpose({ enterEditMode });
 </script>
 
 <template>
-	<div :class="['run-data', $style.container]" @mouseover="activatePane">
+	<div
+		:class="['run-data', $style.container, props.compact ? $style.compact : '']"
+		@mouseover="activatePane"
+	>
 		<N8nCallout
 			v-if="
 				!isPaneTypeInput &&
@@ -1398,19 +1389,27 @@ defineExpose({ enterEditMode });
 					/>
 				</Suspense>
 
-				<N8nRadioButtons
+				<RunDataDisplayModeSelect
 					v-show="
 						hasPreviewSchema ||
 						(hasNodeRun && (inputData.length || binaryData.length || search) && !editMode.enabled)
 					"
-					:model-value="displayMode"
-					:options="displayModes"
-					data-test-id="ndv-run-data-display-mode"
-					@update:model-value="onDisplayModeChange"
+					:class="$style.displayModeSelect"
+					:compact="props.compact"
+					:value="displayMode"
+					:has-binary-data="binaryData.length > 0"
+					:pane-type="paneType"
+					:node-generates-html="
+						activeNode?.type === HTML_NODE_TYPE &&
+						activeNode.parameters.operation === 'generateHtmlTemplate'
+					"
+					@change="onDisplayModeChange"
 				/>
 
+				<RunDataItemCount v-if="props.compact" v-bind="itemsCountProps" />
+
 				<N8nIconButton
-					v-if="canPinData && !isReadOnlyRoute && !readOnlyEnv"
+					v-if="!props.disableEdit && canPinData && !isReadOnlyRoute && !readOnlyEnv"
 					v-show="!editMode.enabled"
 					:title="i18n.baseText('runData.editOutput')"
 					:circle="false"
@@ -1434,7 +1433,7 @@ defineExpose({ enterEditMode });
 					@toggle-pin-data="onTogglePinData({ source: 'pin-icon-click' })"
 				/>
 
-				<div v-show="editMode.enabled" :class="$style.editModeActions">
+				<div v-if="!props.disableEdit" v-show="editMode.enabled" :class="$style.editModeActions">
 					<N8nButton
 						type="tertiary"
 						:label="i18n.baseText('runData.editor.cancel')"
@@ -1455,7 +1454,7 @@ defineExpose({ enterEditMode });
 		</div>
 
 		<div
-			v-if="maxRunIndex > 0 && !displaysMultipleNodes"
+			v-if="maxRunIndex > 0 && !displaysMultipleNodes && !props.disableRunIndexSelection"
 			v-show="!editMode.enabled"
 			:class="$style.runSelector"
 		>
@@ -1497,27 +1496,20 @@ defineExpose({ enterEditMode });
 
 				<slot name="run-info"></slot>
 			</div>
-
-			<a
-				v-if="
-					activeTaskMetadata && hasRelatedExecution && !(paneType === 'input' && hasInputOverwrite)
-				"
-				:class="$style.relatedExecutionInfo"
-				data-test-id="related-execution-link"
-				:href="resolveRelatedExecutionUrl(activeTaskMetadata)"
-				target="_blank"
-				@click.stop="trackOpeningRelatedExecution(activeTaskMetadata, displayMode)"
-			>
-				<N8nIcon icon="external-link-alt" size="xsmall" />
-				{{ getExecutionLinkLabel(activeTaskMetadata) }}
-			</a>
+			<ViewSubExecution
+				v-if="activeTaskMetadata && !(paneType === 'input' && hasInputOverwrite)"
+				:task-metadata="activeTaskMetadata"
+				:display-mode="displayMode"
+			/>
 		</div>
 
 		<slot v-if="!displaysMultipleNodes" name="before-data" />
 
-		<div v-if="props.calloutMessage" :class="$style.hintCallout">
+		<div v-if="props.calloutMessage || $slots['callout-message']" :class="$style.hintCallout">
 			<N8nCallout theme="info" data-test-id="run-data-callout">
-				<N8nText v-n8n-html="props.calloutMessage" size="small"></N8nText>
+				<slot name="callout-message">
+					<N8nText v-n8n-html="props.calloutMessage" size="small"></N8nText>
+				</slot>
 			</N8nCallout>
 		</div>
 
@@ -1537,6 +1529,11 @@ defineExpose({ enterEditMode });
 			data-test-id="branches"
 		>
 			<slot v-if="inputSelectLocation === 'outputs'" name="input-select"></slot>
+			<ViewSubExecution
+				v-if="activeTaskMetadata && !(paneType === 'input' && hasInputOverwrite)"
+				:task-metadata="activeTaskMetadata"
+				:display-mode="displayMode"
+			/>
 
 			<div :class="$style.tabs">
 				<N8nTabs
@@ -1549,6 +1546,7 @@ defineExpose({ enterEditMode });
 
 		<div
 			v-else-if="
+				!props.compact &&
 				hasNodeRun &&
 				!isSearchInSchemaView &&
 				((dataCount > 0 && maxRunIndex === 0) || search) &&
@@ -1556,51 +1554,17 @@ defineExpose({ enterEditMode });
 				!displaysMultipleNodes
 			"
 			v-show="!editMode.enabled"
-			:class="[$style.itemsCount, { [$style.muted]: paneType === 'input' && maxRunIndex === 0 }]"
+			:class="$style.itemsCount"
 			data-test-id="ndv-items-count"
 		>
 			<slot v-if="inputSelectLocation === 'items'" name="input-select"></slot>
 
-			<N8nText v-if="search" :class="$style.itemsText">
-				{{
-					i18n.baseText('ndv.search.items', {
-						adjustToNumber: unfilteredDataCount,
-						interpolate: { matched: dataCount, total: unfilteredDataCount },
-					})
-				}}
-			</N8nText>
-			<N8nText v-else :class="$style.itemsText">
-				<span>
-					{{
-						i18n.baseText('ndv.output.items', {
-							adjustToNumber: dataCount,
-							interpolate: { count: dataCount },
-						})
-					}}
-				</span>
-				<span v-if="activeTaskMetadata?.subExecutionsCount">
-					{{
-						i18n.baseText('ndv.output.andSubExecutions', {
-							adjustToNumber: activeTaskMetadata.subExecutionsCount,
-							interpolate: { count: activeTaskMetadata.subExecutionsCount },
-						})
-					}}
-				</span>
-			</N8nText>
-
-			<a
-				v-if="
-					activeTaskMetadata && hasRelatedExecution && !(paneType === 'input' && hasInputOverwrite)
-				"
-				:class="$style.relatedExecutionInfo"
-				data-test-id="related-execution-link"
-				:href="resolveRelatedExecutionUrl(activeTaskMetadata)"
-				target="_blank"
-				@click.stop="trackOpeningRelatedExecution(activeTaskMetadata, displayMode)"
-			>
-				<N8nIcon icon="external-link-alt" size="xsmall" />
-				{{ getExecutionLinkLabel(activeTaskMetadata) }}
-			</a>
+			<RunDataItemCount v-bind="itemsCountProps" />
+			<ViewSubExecution
+				v-if="activeTaskMetadata && !(paneType === 'input' && hasInputOverwrite)"
+				:task-metadata="activeTaskMetadata"
+				:display-mode="displayMode"
+			/>
 		</div>
 
 		<div ref="dataContainerRef" :class="$style.dataContainer" data-test-id="ndv-data-container">
@@ -1811,6 +1775,7 @@ defineExpose({ enterEditMode });
 					:total-runs="maxRunIndex"
 					:has-default-hover-state="paneType === 'input' && !search"
 					:search="search"
+					:header-bg-color="tableHeaderBgColor"
 					@mounted="emit('tableMounted', $event)"
 					@active-row-changed="onItemHover"
 					@display-mode-change="onDisplayModeChange"
@@ -1939,6 +1904,9 @@ defineExpose({ enterEditMode });
 					</div>
 				</div>
 			</div>
+			<div v-else-if="!hasNodeRun" :class="$style.center">
+				<slot name="node-not-run"></slot>
+			</div>
 		</div>
 		<div
 			v-if="
@@ -1984,6 +1952,8 @@ defineExpose({ enterEditMode });
 </template>
 
 <style lang="scss" module>
+@import '@/styles/variables';
+
 .infoIcon {
 	color: var(--color-foreground-dark);
 }
@@ -2007,7 +1977,6 @@ defineExpose({ enterEditMode });
 	position: relative;
 	width: 100%;
 	height: 100%;
-	background-color: var(--color-run-data-background);
 	display: flex;
 	flex-direction: column;
 }
@@ -2030,6 +1999,11 @@ defineExpose({ enterEditMode });
 	overflow-y: hidden;
 	min-height: calc(30px + var(--spacing-s));
 	scrollbar-width: thin;
+
+	.compact & {
+		margin-bottom: var(--spacing-4xs);
+		padding: var(--spacing-4xs) var(--spacing-s) 0 var(--spacing-s);
+	}
 
 	> *:first-child {
 		flex-grow: 1;
@@ -2092,18 +2066,6 @@ defineExpose({ enterEditMode });
 	padding-right: var(--spacing-s);
 	padding-bottom: var(--spacing-s);
 	flex-flow: wrap;
-
-	.itemsText {
-		flex-shrink: 0;
-		overflow: hidden;
-		white-space: nowrap;
-		text-overflow: ellipsis;
-	}
-
-	&.muted .itemsText {
-		color: var(--color-text-light);
-		font-size: var(--font-size-2xs);
-	}
 }
 
 .inputSelect {
@@ -2220,6 +2182,7 @@ defineExpose({ enterEditMode });
 .displayModes {
 	display: flex;
 	justify-content: flex-end;
+	align-items: center;
 	flex-grow: 1;
 	gap: var(--spacing-2xs);
 }
@@ -2298,12 +2261,17 @@ defineExpose({ enterEditMode });
 	padding: 0 var(--spacing-s);
 }
 
-.relatedExecutionInfo {
-	font-size: var(--font-size-s);
-	margin-left: var(--spacing-3xs);
+.search,
+.displayModeSelect {
+	.compact & {
+		opacity: 0;
+		visibility: hidden;
+		transition: opacity 0.3s $ease-out-expo;
+	}
 
-	svg {
-		padding-bottom: 2px;
+	.compact:hover & {
+		opacity: 1;
+		visibility: visible;
 	}
 }
 </style>
@@ -2322,7 +2290,7 @@ defineExpose({ enterEditMode });
 	color: black;
 	border-radius: var(--border-radius-base);
 	padding: 0 1px;
-	font-weight: normal;
+	font-weight: var(--font-weight-regular);
 	font-style: normal;
 }
 </style>
